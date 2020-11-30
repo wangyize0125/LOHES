@@ -1,0 +1,4 @@
+# ignore project configuration of pycharm
+.idea/
+
+
