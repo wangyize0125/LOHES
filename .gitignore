@@ -1,4 +1,5 @@
 # ignore project configuration of pycharm
 .idea/
 
-
+# ignore cached python file
+__pycache__

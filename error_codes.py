@@ -13,4 +13,4 @@ no_input_file = 1
 not_a_file = 2
 
 # if the .ini file is organized in wrong format, then:
-not_ini_file = 3
+wrong_ini_file = 3
