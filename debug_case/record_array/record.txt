@@ -1,0 +1,2 @@
+# Best target output: 0.0
+# Used time: 0.05107259750366211 s

@@ -7,13 +7,14 @@
 
 import configparser
 
-from settings import *
+from settings import ERROR, RESET, LOG
 from error_codes import wrong_ini_file
 
 
-def parse_settings(filename):
+def parse_settings(filename, default_settings):
     """
     :param filename: .ini file containing the case settings
+    :param default_settings: default settings of the case
     :return: case settings in a dictionary
     """
 
@@ -23,34 +24,51 @@ def parse_settings(filename):
 
     settings = {}
     # configparser has no check method for .ini files
-    # here, we use try-except grammar to check
+    # here, we use try-except grammar to check manually
     try:
-        # for global settings
-        settings["length_x"] = config.getfloat("global", "length_x")
-        settings["length_y"] = config.getfloat("global", "length_y")
+        # There are several issues should be encountered:
+        # 1. check whether the sections and options in the .ini file are legal
+        # 2. if they are legal, read their values into settings; if not, exit
+        # 3. if options are not defined by the users, use default values
+        sections = list(default_settings.keys())
+        for sec in config.sections():
+            # judge the designated section is legal in these codes
+            if not (sec in sections):
+                # if the section is illegal, raise a exception
+                raise Exception("Section '{}' is illegal and unaccepted.".format(sec))
+            else:
+                # if the section is legal, delete section from the sections list
+                sections.remove(sec)
 
-        # for wind turbine layout optimization
-        settings["num_turbine"] = config.getint("wind_turbine", "num_turbine")
-        settings["sx_turbine"] = config.getfloat("wind_turbine", "sx_turbine")
-        settings["sy_turbine"] = config.getfloat("wind_turbine", "sy_turbine")
-        # I hope these codes can be utilized to optimize the layouts of wave energy converters for existing
-        # offshore wind turbine farm. Hence, if predefined layouts are given, only converters will be optimized
-        settings["pre_layouts"] = config.get("wind_turbine", "pre_layouts")
+            # use a nested dict to store the sub-settings
+            tmp = {}
+            options = list(default_settings[sec].keys())
+            for opt in config.options(sec):
+                # judge the designated option is legal in these codes
+                if not (opt in options):
+                    # if the option is illegal, raise a exception
+                    raise Exception("Option '{}' in section '{}' is illegal and unaccepted.".format(opt, sec))
+                else:
+                    # if the option is legal, delete option from the options list
+                    options.remove(opt)
 
-        # for wave energy converter layout optimization
-        settings["num_converter"] = config.getint("wave_energy_converter", "num_converter")
-        settings["sx_converter"] = config.getfloat("wave_energy_converter", "sx_converter")
-        settings["sy_converter"] = config.getfloat("wave_energy_converter", "sy_converter")
-    except configparser.NoSectionError as arg:
-        # no section in .ini file
-        print(ERROR + "Error: {} in {}.".format(arg, filename) + RESET)
-        exit(wrong_ini_file)
-    except configparser.NoOptionError as arg:
-        # no option in .ini file
-        print(ERROR + "Error: {} in {}.".format(arg, filename) + RESET)
-        exit(wrong_ini_file)
-    except ValueError as arg:
-        # value error means str was given for functions int(), float(), boolean()
+                # legal section and option, record its value
+                tmp[opt] = config.get(sec, opt)
+            # if there are options that are not defined by user, use the default values
+            if options:
+                for opt in options:
+                    tmp[opt] = default_settings[sec][opt]
+                    print(LOG + "'{}': '{}' use the default value of '{}'".format(sec, opt, tmp[opt]) + RESET)
+
+            # record this section
+            settings[sec] = tmp
+        # if there are sections that are not defined by user, use the default values
+        if sections:
+            for sec in sections:
+                settings[sec] = default_settings[sec]
+                print(LOG + "'{}' use the default value of '{}'".format(sec, settings[sec]) + RESET)
+    except Exception as arg:
+        # illegal sections and options
         print(ERROR + "Error: {} in {}.".format(arg, filename) + RESET)
         exit(wrong_ini_file)
 
@@ -58,4 +76,7 @@ def parse_settings(filename):
 
 
 if __name__ == "__main__":
-    print(parse_settings("./debug_case/config.ini"))
+    import json
+    import settings
+
+    print(json.dumps(parse_settings("./debug_case/config.ini", settings.default_settings), indent=4))

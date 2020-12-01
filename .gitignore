@@ -2,4 +2,7 @@
 .idea/
 
 # ignore cached python file
-__pycache__
+__pycache__/
+
+# ignore referenceObjV
+referenceObjV/

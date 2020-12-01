@@ -14,3 +14,6 @@ not_a_file = 2
 
 # if the .ini file is organized in wrong format, then:
 wrong_ini_file = 3
+
+# if pre_layouts is given and converter is 0 (false), then:
+no_jobs_todo = 4
