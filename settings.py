@@ -23,6 +23,8 @@ default_settings = {
         "max_generation": 1000,
         "mut_factor": 0.5,
         "cor_factor": 0.3,
+        "log_trace": 1,
+        "log_by_print": 0,
     },
 
     # for wind turbine layout optimization
@@ -40,6 +42,10 @@ default_settings = {
         "max_wv": 25,
         "start_vel": 3.0,
         "cut_vel": 25.0,
+        "turbulence_intensity": 0.8,
+        "ct": 0.8,
+        "rotor_diameter": 90,
+        "cp": 0.4,
     },
 
     # for wave energy converter layout optimization

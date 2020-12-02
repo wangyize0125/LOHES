@@ -9,10 +9,12 @@ import os
 import time
 import numpy as np
 import geatpy as ga
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 from pycuda import driver as drv
 
 from settings import *
+from error_codes import *
 
 
 class OptWT(ga.Problem):
@@ -56,6 +58,9 @@ class OptWT(ga.Problem):
 
         ga.Problem.__init__(self, self.name, self.M, self.maxormins, self.Dim,
                             self.varTypes, self.lb, self.ub, self.lbin, self.ubin)
+
+        # progress bar
+        self.pbar = tqdm(total=self.total_gen)
 
     def display_info(self):
         print("""
@@ -105,17 +110,16 @@ class OptWT(ga.Problem):
         return direcs, vels, wind_distribution
 
     def aimFunc(self, pop):
+        # update progress bar
+        self.pbar.update(1)
+
         # pick out individuals
         inds = pop.Phen
 
         # sort the turbines according to the x coordinate
-        x_coordinate, y_coordinate = inds[:, :self.Dim // 2], inds[:, self.Dim // 2:]
-        sort_indices = np.argsort(x_coordinate, axis=1)
-        x_coordinate = np.take_along_axis(x_coordinate, sort_indices, axis=1)
-        y_coordinate = np.take_along_axis(y_coordinate, sort_indices, axis=1)
-        inds = np.hstack((x_coordinate, y_coordinate))
+        # these codes are transplanted to GPU kernels
 
-        # calculate the constraint values first
+        # calculate the constraint values first, no needs of ordering
         pop.CV = self.cal_cv(inds).reshape((-1, 1))
 
         # objective values
@@ -127,9 +131,8 @@ class OptWT(ga.Problem):
                     # no wind
                     continue
                 else:
-                    # calculate the energy output corresponding this wind
-                    pop.ObjV = self.predict_energy(inds, pop.ObjV, self.direcs[i], self.vels[j], self.wind_dist[i][j])
-
+                    # calculate the energy output corresponding this wind, needs ordering and rotating
+                    pop.ObjV = self.predict_energy(inds, pop.ObjV, self.direcs[j], self.vels[j], self.wind_dist[i][j])
         pop.ObjV = pop.ObjV.reshape((-1, 1))
 
     def cal_cv(self, inputs):
@@ -144,13 +147,11 @@ class OptWT(ga.Problem):
         k_cvs = np.float32(np.zeros(rows))
         k_sx = np.float32(self.sx)
         k_sy = np.float32(self.sy)
-        k_num = np.int32(rows)
-        k_nd = np.int32(cols // 2)
 
         # pick out the function
-        func = self.kernels.get_function("cal_cv")
-        func(drv.In(k_layouts), drv.Out(k_cvs), drv.In(k_sx), drv.In(k_sy), drv.In(k_num), drv.In(k_nd),
-             grid=(10, 1, 1), block=(int(rows // 10 + 1), 1, 1))
+        func = self.kernels.get_function("cal_cv_turb")
+        func(drv.In(k_layouts), drv.Out(k_cvs), drv.In(k_sx), drv.In(k_sy),
+             grid=(int(rows // 10 + 1), 1, 1), block=(10, 1, 1))
 
         return k_cvs
 
@@ -168,15 +169,17 @@ class OptWT(ga.Problem):
         k_vel = np.float32(vel).flatten()
         k_start_vel = np.float32(self.settings["wind_turbine"]["start_vel"]).flatten()
         k_cut_vel = np.float32(self.settings["wind_turbine"]["cut_vel"]).flatten()
+        k_turb_int = np.float32(self.settings["wind_turbine"]["turbulence_intensity"]).flatten()
         k_prob = np.float32(prob).flatten()
-        k_num = np.int32(rows).flatten()
-        k_nd = np.int32(cols // 2).flatten()
+        k_ct = np.float32(self.settings["wind_turbine"]["ct"]).flatten()
+        k_rad = np.float32(self.settings["wind_turbine"]["rotor_diameter"]).flatten()
+        k_cp = np.float32(self.settings["wind_turbine"]["cp"]).flatten()
 
         # predict energy
-        func = self.kernels.get_function("pre_energy")
+        func = self.kernels.get_function("pre_energy_turb")
         func(drv.In(k_layouts), drv.InOut(k_energys), drv.In(k_direc), drv.In(k_vel), drv.In(k_start_vel),
-             drv.In(k_cut_vel), drv.In(k_prob), drv.In(k_num), drv.In(k_nd),
-             grid=(10, 1, 1), block=(int(rows // 10 + 1), 1, 1))
+             drv.In(k_cut_vel), drv.In(k_turb_int), drv.In(k_prob), drv.In(k_ct), drv.In(k_rad), drv.In(k_cp),
+             grid=(int(rows // 10 + 1), 1, 1), block=(10, 1, 1))
 
         return k_energys
 
@@ -188,14 +191,20 @@ def run_wind_turbine(problem):
 
     # settings for genetic algorithm, most parameters can be specified through the .ini file
     Encoding = "RI"
+    # number of individuals in a population
     NIND = int(problem.settings["global"]["num_individual"])
     Field = ga.crtfld(Encoding, problem.varTypes, problem.ranges, problem.borders)
     population = ga.Population(Encoding, Field, NIND)
     myAlgo = ga.soea_DE_best_1_L_templet(problem, population)
+    # maximum number of generations
     myAlgo.MAXGEN = int(problem.settings["global"]["max_generation"])
+    # mutation and crossover factors
     myAlgo.mutOper.F = float(problem.settings["global"]["mut_factor"])
     myAlgo.recOper.XOVR = float(problem.settings["global"]["cor_factor"])
     myAlgo.drawing = 0
+    # record log every {logTras} steps and whether print log
+    myAlgo.logTras = int(problem.settings["global"]["log_trace"])
+    myAlgo.verbose = bool(int(problem.settings["global"]["log_by_print"]))
 
     # display running information for debug
     print(TIP + """
@@ -209,35 +218,40 @@ def run_wind_turbine(problem):
     # record computational time
     start_t = time.time()
     [best_ind, population] = myAlgo.run()
+    # delete progress bar in problem
+    problem.pbar.close()
     # time interval
     end_t = time.time()
     interval_t = end_t - start_t
 
-    # output: optimization results of wind turbines
-    best_ind.save(os.path.join(problem.settings["proj_name"], "record_array"))
-    file = open(os.path.join(problem.settings["proj_name"], "record_array", "record.txt"), "w")
-    file.write("# Best target output: {}\n".format(best_ind.ObjV[0][0]))
-    file.write("# Used time: {} s\n".format(interval_t))
-    file.close()
+    try:
+        # output: optimization results of wind turbines
+        best_ind.save(os.path.join(problem.settings["proj_name"], "record_array"))
+        file = open(os.path.join(problem.settings["proj_name"], "record_array", "record.txt"), "w")
+        file.write("# Used time: {} s\n".format(interval_t))
+        if myAlgo.log:
+            file.write(
+                "\n".join(
+                    ["{:.6f} {:.6f}".format(myAlgo.log["f_avg"][gen], myAlgo.log["f_max"][gen]) for gen in range(len(myAlgo.log["gen"]))]
+                )
+            )
+        file.close()
 
-    # output: plot the wind turbine array figure
-    fig = plt.figure(figsize=(10, 10))
-    file = open(os.path.join(problem.settings["proj_name"], "record_array", "Phen.csv"))
-    var_trace = [float(item) for item in file.readline().split(",")]
-    for i in range(len(var_trace) // 2):
-        plt.scatter([var_trace[i]], [var_trace[i + len(var_trace) // 2]], s=30)
-    plt.savefig(os.path.join(problem.settings["proj_name"], "record_array", "record_array.png"))
+        # output: plot the wind turbine array figure
+        fig = plt.figure(figsize=(10, 10))
+        file = open(os.path.join(problem.settings["proj_name"], "record_array", "Phen.csv"))
+        var_trace = [float(item) for item in file.readline().split(",")]
+        for i in range(len(var_trace) // 2):
+            plt.scatter([var_trace[i]], [var_trace[i + len(var_trace) // 2]], s=100, c="k")
+        plt.savefig(os.path.join(problem.settings["proj_name"], "record_array", "array.png"))
 
-    # # output: plot the objv curves
-    # fig = plt.figure(figsize=(10, 10))
-    # file = open(os.path.join(problem.settings["proj_name"], "record_array.txt"), "r")
-    # file.readline()
-    # file.readline()
-    # file.readline()
-    # file.readline()
-    # file.readline()
-    # data = np.array([[float(item) for item in line.split()] for line in file.readlines()])
-    # plt.plot(data[:, 0], label="min")
-    # plt.plot(data[:, 1], label="max")
-    # plt.legend()
-    # plt.savefig(os.path.join(problem.settings["proj_name"], "record_array_objv.png"))
+        # output: plot the objv curves
+        fig = plt.figure(figsize=(10, 10))
+        plt.plot(myAlgo.log["f_max"], label="max")
+        plt.plot(myAlgo.log["f_avg"], label="avg")
+        plt.legend()
+        plt.savefig(os.path.join(problem.settings["proj_name"], "record_array", "objvs.png"))
+    except KeyError as arg:
+        print(ERROR + "Genetic algorithm failed: {}".format(arg) + RESET)
+        print(TIP + "You can re-execute these codes by amplifying your target wave farm." + RESET)
+        exit(ga_failed)

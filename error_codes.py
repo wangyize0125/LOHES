@@ -17,3 +17,6 @@ wrong_ini_file = 3
 
 # if pre_layouts is given and converter is 0 (false), then:
 no_jobs_todo = 4
+
+# genetic algorithm failed
+ga_failed = 5

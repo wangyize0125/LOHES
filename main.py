@@ -31,7 +31,7 @@ if __name__ == "__main__":
     settings["proj_name"] = proj_name
 
     # initialize cuda environment
-    kernels = init_cuda()
+    kernels = init_cuda(settings)
 
     # optimize the hybrid energy system accordingly
     if bool(settings["wind_turbine"]["pre_layouts"]):

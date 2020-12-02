@@ -12,11 +12,14 @@ from mako.template import Template
 from settings import *
 
 
-def init_cuda():
+def init_cuda(settings):
     # read the kernels file
     kernels = open("./kernels.cu", "r")
     kernels = Template("".join(kernels.readlines()))
-    kernels = kernels.render()
+    kernels = kernels.render(
+        num_inds=int(settings["global"]["num_individual"]),
+        num_turbs=int(settings["wind_turbine"]["num_turbine"]),
+    )
 
     # compile the kernel
     module = SourceModule(kernels, no_extern_c=True)
