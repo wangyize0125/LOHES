@@ -107,6 +107,12 @@ class OptWT(ga.Problem):
         # calculate probability
         wind_distribution /= line_number
 
+        # from the simulation results, it was found that the optimization results approximately
+        # face the major wind direction. Hence, I add an option to disable wind direction
+        if bool(int(self.settings["wind_turbine"]["ignore_direction"])):
+            direcs = np.array([0])
+            wind_distribution = np.sum(wind_distribution, axis=0).reshape((1, -1))
+
         return direcs, vels, wind_distribution
 
     def aimFunc(self, pop):
@@ -132,7 +138,7 @@ class OptWT(ga.Problem):
                     continue
                 else:
                     # calculate the energy output corresponding this wind, needs ordering and rotating
-                    pop.ObjV = self.predict_energy(inds, pop.ObjV, self.direcs[j], self.vels[j], self.wind_dist[i][j])
+                    pop.ObjV = self.predict_energy(inds, pop.ObjV, self.direcs[i], self.vels[j], self.wind_dist[i][j])
         pop.ObjV = pop.ObjV.reshape((-1, 1))
 
     def cal_cv(self, inputs):
@@ -183,6 +189,50 @@ class OptWT(ga.Problem):
 
         return k_energys
 
+    def plot_field(self, ind):
+        # generate coordinates in x and y
+        x_array = np.linspace(0, self.ub[0], 100, endpoint=True)
+        y_array = np.linspace(0, self.ub[-1], 100, endpoint=True)
+        x_array, y_array = np.meshgrid(x_array, y_array)
+
+        # here, we need to sort the turbines owing to that we will use predict_energy later to
+        # predict the wind velocity and turbulence intensity ahead the wind turbines, in which
+        # wind turbines will be sorted. If we use unsorted turbines continuously, they cant
+        # correspond each other one-by-one. So, we sort the decides first:
+        x_coordinate, y_coordinate = np.array(ind[:self.Dim // 2]), np.array(ind[self.Dim // 2:])
+        sort_indices = np.argsort(x_coordinate)
+        x_coordinate = x_coordinate[sort_indices].flatten()
+        y_coordinate = y_coordinate[sort_indices].flatten()
+        ind = np.hstack((x_coordinate, y_coordinate))
+
+        # first, call predict energy function
+        # then, the first rows of wind_vels and turb_ints on GPU
+        # maintain those of this ind, we can step in
+        self.predict_energy(np.array(ind).reshape((1, -1)), 0, 0, float(self.settings["wind_turbine"]["plot_wind"]), 1)
+
+        # prepare data
+        k_input = np.float32(ind).flatten()
+        k_x = np.float32(x_array).flatten()
+        k_y = np.float32(y_array).flatten()
+        k_winds = np.float32(np.zeros_like(k_x)).flatten()
+        k_turbs = np.float32(np.zeros_like(k_x)).flatten()
+        k_num = np.int32(k_x.size).flatten()
+        k_plot_wind = np.float32(float(self.settings["wind_turbine"]["plot_wind"])).flatten()
+        k_plot_turb = np.float32(float(self.settings["wind_turbine"]["turbulence_intensity"])).flatten()
+        k_ct = np.float32(self.settings["wind_turbine"]["ct"]).flatten()
+        k_rad = np.float32(self.settings["wind_turbine"]["rotor_diameter"]).flatten()
+
+        func = self.kernels.get_function("plot_field_turb")
+        func(drv.In(k_input), drv.In(k_x), drv.In(k_y), drv.Out(k_winds), drv.Out(k_turbs), drv.In(k_num),
+             drv.In(k_plot_wind), drv.In(k_plot_turb), drv.In(k_ct), drv.In(k_rad),
+             grid=(int(k_x.size // 20 + 1), 1, 1), block=(20, 1, 1))
+
+        # reshape winds and turbs
+        wind_vels = k_winds.reshape(x_array.shape)
+        turb_ints = k_turbs.reshape(x_array.shape)
+
+        return x_array, y_array, wind_vels, turb_ints
+
 
 def run_wind_turbine(problem):
     """
@@ -190,21 +240,17 @@ def run_wind_turbine(problem):
     """
 
     # settings for genetic algorithm, most parameters can be specified through the .ini file
-    Encoding = "RI"
-    # number of individuals in a population
-    NIND = int(problem.settings["global"]["num_individual"])
+    Encoding = "RI"     # encoding of the individuals, RI means use real numbers to encode
+    NIND = int(problem.settings["global"]["num_individual"])    # number of individuals
     Field = ga.crtfld(Encoding, problem.varTypes, problem.ranges, problem.borders)
-    population = ga.Population(Encoding, Field, NIND)
-    myAlgo = ga.soea_DE_best_1_L_templet(problem, population)
-    # maximum number of generations
-    myAlgo.MAXGEN = int(problem.settings["global"]["max_generation"])
-    # mutation and crossover factors
-    myAlgo.mutOper.F = float(problem.settings["global"]["mut_factor"])
-    myAlgo.recOper.XOVR = float(problem.settings["global"]["cor_factor"])
-    myAlgo.drawing = 0
-    # record log every {logTras} steps and whether print log
-    myAlgo.logTras = int(problem.settings["global"]["log_trace"])
-    myAlgo.verbose = bool(int(problem.settings["global"]["log_by_print"]))
+    population = ga.Population(Encoding, Field, NIND)   # generate the population instance
+    myAlgo = ga.soea_DE_best_1_L_templet(problem, population)   # initialize the problem
+    myAlgo.MAXGEN = int(problem.settings["global"]["max_generation"])   # number of generations
+    myAlgo.mutOper.F = float(problem.settings["global"]["mut_factor"])  # mutation factor
+    myAlgo.recOper.XOVR = float(problem.settings["global"]["cor_factor"])   # crossover factor
+    myAlgo.drawing = 0  # 0: no drawing; 1: drawing at the end of process; 2: animated drawing
+    myAlgo.logTras = int(problem.settings["global"]["log_trace"])   # record log every * steps
+    myAlgo.verbose = bool(int(problem.settings["global"]["log_by_print"]))  # whether print log
 
     # display running information for debug
     print(TIP + """
@@ -217,6 +263,7 @@ def run_wind_turbine(problem):
 
     # record computational time
     start_t = time.time()
+    # run genetic algorithm
     [best_ind, population] = myAlgo.run()
     # delete progress bar in problem
     problem.pbar.close()
@@ -224,34 +271,67 @@ def run_wind_turbine(problem):
     end_t = time.time()
     interval_t = end_t - start_t
 
-    try:
-        # output: optimization results of wind turbines
-        best_ind.save(os.path.join(problem.settings["proj_name"], "record_array"))
-        file = open(os.path.join(problem.settings["proj_name"], "record_array", "record.txt"), "w")
-        file.write("# Used time: {} s\n".format(interval_t))
-        if myAlgo.log:
-            file.write(
-                "\n".join(
-                    ["{:.6f} {:.6f}".format(myAlgo.log["f_avg"][gen], myAlgo.log["f_max"][gen]) for gen in range(len(myAlgo.log["gen"]))]
-                )
-            )
-        file.close()
-
-        # output: plot the wind turbine array figure
-        fig = plt.figure(figsize=(10, 10))
-        file = open(os.path.join(problem.settings["proj_name"], "record_array", "Phen.csv"))
-        var_trace = [float(item) for item in file.readline().split(",")]
-        for i in range(len(var_trace) // 2):
-            plt.scatter([var_trace[i]], [var_trace[i + len(var_trace) // 2]], s=100, c="k")
-        plt.savefig(os.path.join(problem.settings["proj_name"], "record_array", "array.png"))
-
-        # output: plot the objv curves
-        fig = plt.figure(figsize=(10, 10))
-        plt.plot(myAlgo.log["f_max"], label="max")
-        plt.plot(myAlgo.log["f_avg"], label="avg")
-        plt.legend()
-        plt.savefig(os.path.join(problem.settings["proj_name"], "record_array", "objvs.png"))
-    except KeyError as arg:
-        print(ERROR + "Genetic algorithm failed: {}".format(arg) + RESET)
+    # judge whether genetic algorithm failed
+    if myAlgo.log["gen"] == 0:
+        print(ERROR + "Genetic algorithm failed!!!" + RESET)
         print(TIP + "You can re-execute these codes by amplifying your target wave farm." + RESET)
         exit(ga_failed)
+    # otherwise, genetic algorithm succeed
+    # output: optimization results of wind turbines
+    best_ind.save(os.path.join(problem.settings["proj_name"], "record_array"))
+    file = open(os.path.join(problem.settings["proj_name"], "record_array", "record.txt"), "w")
+    file.write("# Used time: {} s\n".format(interval_t))
+    file.write("# average_objv, maximum_objv\n")
+    if myAlgo.log:
+        file.write(
+            "\n".join(
+                ["{:.6f}, {:.6f}".format(myAlgo.log["f_avg"][gen], myAlgo.log["f_max"][gen]) for gen in range(len(myAlgo.log["gen"]))]
+            )
+        )
+    file.close()
+
+    # output: plot the objv curves
+    fig = plt.figure(figsize=(10, 10))
+    plt.plot(myAlgo.log["f_max"], label="max")
+    plt.plot(myAlgo.log["f_avg"], label="avg")
+    plt.legend()
+    plt.savefig(os.path.join(problem.settings["proj_name"], "record_array", "objvs.png"))
+
+    # output: plot the wind turbine array figure
+    fig = plt.figure(figsize=(16, 8))
+    file = open(os.path.join(problem.settings["proj_name"], "record_array", "Phen.csv"))
+    # read out the best individual
+    var_trace = [float(item) for item in file.readline().split(",")]
+    # plot the best individual in tow sub plots
+    for sub in range(1, 3):
+        plt.subplot(1, 2, sub)
+        for i in range(len(var_trace) // 2):
+            # plt.scatter([var_trace[i]], [var_trace[i + len(var_trace) // 2]], s=100, c="k", zorder=2)
+            plt.plot(
+                [var_trace[i], var_trace[i]],
+                [var_trace[i + len(var_trace) // 2] - float(problem.settings["wind_turbine"]["rotor_diameter"]),
+                 var_trace[i + len(var_trace) // 2] + float(problem.settings["wind_turbine"]["rotor_diameter"])],
+                "k-", linewidth=5, zorder=2
+            )
+
+        # tune the sub plots limits
+        plt.xlim((0, problem.ub[0]))
+        plt.ylim((0, problem.ub[-1]))
+    # compute flow fields of the best individual
+    x_array, y_array, wind_vels, turb_ints = problem.plot_field(var_trace)
+    # plot wind velocity and turbulence intensity
+    plt.subplot(1, 2, 1)
+    plt.contourf(x_array, y_array, wind_vels, zorder=1, cmap="bwr")
+    plt.subplot(1, 2, 2)
+    plt.contourf(x_array, y_array, turb_ints, zorder=1, cmap="bwr")
+    # output flow fields into a file
+    x_array = x_array.flatten()
+    y_array = y_array.flatten()
+    wind_vels = wind_vels.flatten()
+    turb_ints = turb_ints.flatten()
+    file = open(os.path.join(problem.settings["proj_name"], "record_array", "flow_fields.txt"), "w")
+    file.write("# x, y, wind_velocity, turb_intensity\n")
+    for i in range(x_array.size):
+        file.write("{}, {}, {}, {}\n".format(x_array[i], y_array[i], wind_vels[i], turb_ints[i]))
+    file.close()
+    plt.savefig(os.path.join(problem.settings["proj_name"], "record_array", "array.png"))

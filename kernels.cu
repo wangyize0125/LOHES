@@ -165,8 +165,8 @@ __global__ void pre_energy_turb(float* inputs, float* energys, float* direc_addr
         // solve wind velocity and turbulence intensity for each wind turbine
         for(int j = i + 1; j < num_turbs; j++){
             // here is x/d as can be found in function {rotate_and_order}
-            x_d = (inputs[j] - inputs[i]);
-            r = (inputs[j + num_turbs] - inputs[i + num_turbs]);
+            x_d = inputs[j] - inputs[i];
+            r = inputs[j + num_turbs] - inputs[i + num_turbs];
 
             // compute wind velocity
             delta = (*rad_addr) * (kk * x_d + eps);
@@ -194,5 +194,61 @@ __global__ void pre_energy_turb(float* inputs, float* energys, float* direc_addr
         // accumulate energy output
         energys[threadId] += kk * pow(wind_vels[threadId][i], 3);
     }
+}
+
+/* -------------------------------------------------------- */
+// Name: plot_field_turb
+// TODO: plot wind velocity and turbulence intensity field
+/* -------------------------------------------------------- */
+__global__ void plot_field_turb(float* inputs, float* x_array, float* y_array, float* winds, float* turbs,
+    int* num_points_addr, float* plot_wind, float* plot_turb, float* ct_addr, float* rad_addr){
+    // calculate the index
+    const int threadId = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if(threadId >= *num_points_addr){
+        // too much threads
+        return;
+    }
+
+    // if(threadId == 0){
+    //     // printf("Wind velocity, turbulence intensity:\n");
+    //     // for(int i = 0; i < num_turbs; i++){
+    //     //     printf("%f, %f\n", wind_vels[0][i], turb_ints[0][i]);
+    //     // }
+    //     printf("wind: %f, ia: %f, ct: %f, d: %f\n", *plot_wind, *plot_turb, *ct_addr, *rad_addr);
+    // }
+
+    // declare them in registers to accelerate the codes
+    float x = x_array[threadId], y = y_array[threadId], wind = pow(*plot_wind, 2), turb = pow(*plot_turb, 2);
+
+    // analytical model parameters
+    float ct = *ct_addr, kk, eps, a, b, c, d, e, f, k1, k2, delta, x_d, r;
+    for(int i = 0; i < num_turbs; i++){
+        // loop each turbine to accumulate their effects
+        if(x > inputs[i]){
+            // has wake effects
+            // compute the parameters
+            kk = 0.11 * pow(ct, 1.07) * pow(turb_ints[0][i], 0.2);
+            eps = 0.23 * pow(ct, -0.25) * pow(turb_ints[0][i], 0.17);
+            a = 0.93 * pow(ct, -0.75) * pow(turb_ints[0][i], 0.17);
+            b = 0.42 * pow(ct, 0.6) * pow(turb_ints[0][i], 0.2);
+            c = 0.15 * pow(ct, -0.25) * pow(turb_ints[0][i], -0.7);
+            d = 2.3 * pow(ct, -1.2);
+            e = pow(turb_ints[0][i], 0.1);
+            f = 0.7 * pow(ct, -3.2) * pow(turb_ints[0][i], -0.45);
+            x_d = (x - inputs[i]) / (*rad_addr);
+            r = y - inputs[i + num_turbs];
+            delta = (*rad_addr) * (kk * x_d + eps);
+            // update wind velocity
+            wind -= pow(wind_vels[0][i] / pow(a + b * x_d + c * pow(1 + x_d, -2), 2) * exp(-0.5 * pow(r / delta, 2)), 2);
+            // update turbulence intensity
+            k1 = (r / *rad_addr > 0.5) ? 1.0 : pow(cos(pi / 2 * (r / *rad_addr - 0.5)), 2);
+            k2 = (r / *rad_addr > 0.5) ? 0.0 : pow(cos(pi / 2 * (r / *rad_addr + 0.5)), 2);
+            turb += pow((k1 * exp(-pow((r - *rad_addr / 2) / delta, 2) / 2) + k2 * exp(-pow((r + *rad_addr / 2) / delta, 2) / 2)) / (d + e * x_d + f * pow(1 + x_d, -2)), 2);
+        }
+    }
+
+    // transfer out
+    winds[threadId] = pow(wind, 0.5); turbs[threadId] = pow(turb, 0.5);
 }
 }

@@ -46,6 +46,8 @@ default_settings = {
         "ct": 0.8,
         "rotor_diameter": 90,
         "cp": 0.4,
+        "plot_wind": 12,
+        "ignore_direction": 1,
     },
 
     # for wave energy converter layout optimization
