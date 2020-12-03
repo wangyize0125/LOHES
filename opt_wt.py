@@ -177,14 +177,13 @@ class OptWT(ga.Problem):
         k_cut_vel = np.float32(self.settings["wind_turbine"]["cut_vel"]).flatten()
         k_turb_int = np.float32(self.settings["wind_turbine"]["turbulence_intensity"]).flatten()
         k_prob = np.float32(prob).flatten()
-        k_ct = np.float32(self.settings["wind_turbine"]["ct"]).flatten()
         k_rad = np.float32(self.settings["wind_turbine"]["rotor_diameter"]).flatten()
         k_cp = np.float32(self.settings["wind_turbine"]["cp"]).flatten()
 
         # predict energy
         func = self.kernels.get_function("pre_energy_turb")
         func(drv.In(k_layouts), drv.InOut(k_energys), drv.In(k_direc), drv.In(k_vel), drv.In(k_start_vel),
-             drv.In(k_cut_vel), drv.In(k_turb_int), drv.In(k_prob), drv.In(k_ct), drv.In(k_rad), drv.In(k_cp),
+             drv.In(k_cut_vel), drv.In(k_turb_int), drv.In(k_prob), drv.In(k_rad), drv.In(k_cp),
              grid=(int(rows // 10 + 1), 1, 1), block=(10, 1, 1))
 
         return k_energys
@@ -219,12 +218,11 @@ class OptWT(ga.Problem):
         k_num = np.int32(k_x.size).flatten()
         k_plot_wind = np.float32(float(self.settings["wind_turbine"]["plot_wind"])).flatten()
         k_plot_turb = np.float32(float(self.settings["wind_turbine"]["turbulence_intensity"])).flatten()
-        k_ct = np.float32(self.settings["wind_turbine"]["ct"]).flatten()
         k_rad = np.float32(self.settings["wind_turbine"]["rotor_diameter"]).flatten()
 
         func = self.kernels.get_function("plot_field_turb")
         func(drv.In(k_input), drv.In(k_x), drv.In(k_y), drv.Out(k_winds), drv.Out(k_turbs), drv.In(k_num),
-             drv.In(k_plot_wind), drv.In(k_plot_turb), drv.In(k_ct), drv.In(k_rad),
+             drv.In(k_plot_wind), drv.In(k_plot_turb), drv.In(k_rad),
              grid=(int(k_x.size // 20 + 1), 1, 1), block=(20, 1, 1))
 
         # reshape winds and turbs

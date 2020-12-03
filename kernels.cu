@@ -46,7 +46,8 @@ __device__ inline float cal_cv(float* inputs, float sx, float sy, int num_devs){
         }
     }
 
-    return is_ok? cv_true: cv_false;
+    // use 1/* to ensure they are compact
+    return is_ok? 1 / cv_true: 1 / cv_false;
 }
 
 /* -------------------------------------------------------- */
@@ -107,7 +108,7 @@ __device__ inline void rotate_and_order(float* inputs, float direc, float radius
 // TODO: calculate the energy outputs of the wind turbines 
 /* -------------------------------------------------------- */
 __global__ void pre_energy_turb(float* inputs, float* energys, float* direc_addr, float* vel_addr, float* start_vel_addr,
-    float* cut_vel_addr, float* turb_int_addr, float* prob_addr, float* ct_addr, float* rad_addr, float* cp_addr){
+    float* cut_vel_addr, float* turb_int_addr, float* prob_addr, float* rad_addr, float* cp_addr){
     // calculate the index
     const int threadId = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -148,10 +149,11 @@ __global__ void pre_energy_turb(float* inputs, float* energys, float* direc_addr
     // then, inputs can be utilized as the first wind turbine for each thread
 
     // parameters of the analytical models
-    float ct = *ct_addr, kk, eps, a, b, c, d, e, f, k1, k2, delta, x_d, r;
+    float ct, kk, eps, a, b, c, d, e, f, k1, k2, delta, x_d, r;
     // loop for each turbine to calculate their wind velocity and turbulence intensity
     for(int i = 0; i < num_turbs - 1; i++){
         // compute the parameters
+        ct = 1 / (0.00000547581845 * pow(wind_vels[threadId][i], 5.00641402) + 1.132584887);
         kk = 0.11 * pow(ct, 1.07) * pow(turb_ints[threadId][i], 0.20);
         eps = 0.23 * pow(ct, -0.25) * pow(turb_ints[threadId][i], 0.17);
         a = 0.93 * pow(ct, -0.75) * pow(turb_ints[threadId][i], 0.17);
@@ -201,7 +203,7 @@ __global__ void pre_energy_turb(float* inputs, float* energys, float* direc_addr
 // TODO: plot wind velocity and turbulence intensity field
 /* -------------------------------------------------------- */
 __global__ void plot_field_turb(float* inputs, float* x_array, float* y_array, float* winds, float* turbs,
-    int* num_points_addr, float* plot_wind, float* plot_turb, float* ct_addr, float* rad_addr){
+    int* num_points_addr, float* plot_wind, float* plot_turb, float* rad_addr){
     // calculate the index
     const int threadId = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -222,12 +224,13 @@ __global__ void plot_field_turb(float* inputs, float* x_array, float* y_array, f
     float x = x_array[threadId], y = y_array[threadId], wind = pow(*plot_wind, 2), turb = pow(*plot_turb, 2);
 
     // analytical model parameters
-    float ct = *ct_addr, kk, eps, a, b, c, d, e, f, k1, k2, delta, x_d, r;
+    float ct, kk, eps, a, b, c, d, e, f, k1, k2, delta, x_d, r;
     for(int i = 0; i < num_turbs; i++){
         // loop each turbine to accumulate their effects
         if(x > inputs[i]){
             // has wake effects
             // compute the parameters
+            ct = 1 / (0.00000547581845 * pow(wind_vels[0][i], 5.00641402) + 1.132584887);
             kk = 0.11 * pow(ct, 1.07) * pow(turb_ints[0][i], 0.2);
             eps = 0.23 * pow(ct, -0.25) * pow(turb_ints[0][i], 0.17);
             a = 0.93 * pow(ct, -0.75) * pow(turb_ints[0][i], 0.17);

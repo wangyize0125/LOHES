@@ -43,7 +43,6 @@ default_settings = {
         "start_vel": 3.0,
         "cut_vel": 25.0,
         "turbulence_intensity": 0.8,
-        "ct": 0.8,
         "rotor_diameter": 90,
         "cp": 0.4,
         "plot_wind": 12,
