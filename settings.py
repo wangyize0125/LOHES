@@ -21,8 +21,9 @@ default_settings = {
         "length_y": 20000.0,
         "num_individual": 600,
         "max_generation": 1000,
-        "mut_factor": 0.5,
-        "cor_factor": 0.3,
+        "mut_factor": 0.2,
+        "mut_prob": 0.2,
+        "cor_factor": 0.9,
         "log_trace": 1,
         "log_by_print": 0,
     },
@@ -55,5 +56,6 @@ default_settings = {
         "sx_converter": 100.0,
         "sy_converter": 100.0,
         "converter": True,
+        "wave_distribution": None,
     },
 }

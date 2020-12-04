@@ -45,9 +45,7 @@ class OptWT(ga.Problem):
         self.sx = float(settings["wind_turbine"]["sx_turbine"])
         self.sy = float(settings["wind_turbine"]["sy_turbine"])
         # wind distribution
-        self.direcs, self.vels, self.wind_dist = self.handle_wind_distribution(
-            os.path.join(self.settings["proj_name"], self.settings["wind_turbine"]["wind_distribution"])
-        )
+        self.direcs, self.vels, self.wind_dist = self.handle_wind_distribution()
         # kernels
         self.kernels = kernels
         # total number of generations
@@ -71,14 +69,14 @@ class OptWT(ga.Problem):
                 Total generation: {}
         """.format(self.Dim, self.ub[0], self.ub[-1], self.sx, self.sy, self.total_gen) + RESET)
 
-    def handle_wind_distribution(self, filename):
+    def handle_wind_distribution(self):
         """
         :param filename:
         :return: wind direction and wind velocity distribution
         """
 
         # open file
-        file = open(filename, "r")
+        file = open(os.path.join(self.settings["proj_name"], self.settings["wind_turbine"]["wind_distribution"]), "r")
         # step over the first line
         file.readline()
 
@@ -130,7 +128,7 @@ class OptWT(ga.Problem):
 
         # objective values
         pop.ObjV = np.zeros((inds.shape[0], 1))
-        # iterate each wave period and height combination
+        # iterate each wind velocity and direction combination
         for j in range(self.vels.size):
             for i in range(self.direcs.size):
                 if self.wind_dist[i][j] <= 1E-10:
@@ -145,7 +143,7 @@ class OptWT(ga.Problem):
         """
             calculate the constraint values for each individual
         """
-
+        
         rows, cols = inputs.shape
 
         # prepare data
@@ -245,6 +243,7 @@ def run_wind_turbine(problem):
     myAlgo = ga.soea_DE_best_1_L_templet(problem, population)   # initialize the problem
     myAlgo.MAXGEN = int(problem.settings["global"]["max_generation"])   # number of generations
     myAlgo.mutOper.F = float(problem.settings["global"]["mut_factor"])  # mutation factor
+    myAlgo.mutOper.Pm = float(problem.settings["global"]["mut_prob"])  # mutation probability
     myAlgo.recOper.XOVR = float(problem.settings["global"]["cor_factor"])   # crossover factor
     myAlgo.drawing = 0  # 0: no drawing; 1: drawing at the end of process; 2: animated drawing
     myAlgo.logTras = int(problem.settings["global"]["log_trace"])   # record log every * steps
@@ -256,8 +255,9 @@ def run_wind_turbine(problem):
             Number of individuals: {},
             Number of generations: {},
             Mutation factor: {},
+            Mutation Probability: {},
             Crossover factor: {}
-    """.format(NIND, myAlgo.MAXGEN, myAlgo.mutOper.F, myAlgo.recOper.XOVR) + RESET)
+    """.format(NIND, myAlgo.MAXGEN, myAlgo.mutOper.F, myAlgo.mutOper.Pm, myAlgo.recOper.XOVR) + RESET)
 
     # record computational time
     start_t = time.time()
@@ -270,7 +270,7 @@ def run_wind_turbine(problem):
     interval_t = end_t - start_t
 
     # judge whether genetic algorithm failed
-    if myAlgo.log["gen"] == 0:
+    if len(myAlgo.log["gen"]) == 0:
         print(ERROR + "Genetic algorithm failed!!!" + RESET)
         print(TIP + "You can re-execute these codes by amplifying your target wave farm." + RESET)
         exit(ga_failed)

@@ -15,6 +15,7 @@ from pykernel import init_cuda
 from parse_arg import parse_arg
 from parse_settings import parse_settings
 from opt_wt import OptWT, run_wind_turbine
+from opt_wec import OptWEC, run_wave_energy_converter
 
 if __name__ == "__main__":
     # initialize color settings
@@ -37,6 +38,11 @@ if __name__ == "__main__":
     if bool(settings["wind_turbine"]["pre_layouts"]):
         if bool(int(settings["wave_energy_converter"]["converter"])):
             print(LOG + "\nOptimize wave energy converters solely" + RESET)
+
+            # instantiate a problem instance
+            opt_wec = OptWEC(settings, kernels)
+            # run the genetic algorithm
+            run_wave_energy_converter(opt_wec)
         else:
             print(TIP + "No jobs to do: pre_layouts and converter can not be defined simultaneously" + RESET)
             exit(no_jobs_todo)

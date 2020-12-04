@@ -254,4 +254,7 @@ __global__ void plot_field_turb(float* inputs, float* x_array, float* y_array, f
     // transfer out
     winds[threadId] = pow(wind, 0.5); turbs[threadId] = pow(turb, 0.5);
 }
+
+// TODO: order wave energy converters
+
 }
