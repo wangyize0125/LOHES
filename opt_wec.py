@@ -11,6 +11,7 @@ import numpy as np
 import geatpy as ga
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from pycuda import driver as drv
 
 from settings import *
 from error_codes import *
@@ -33,22 +34,29 @@ class OptWEC(ga.Problem):
         self.varTypes = [0] * self.Dim
         # lower limits of variables
         self.lb = [0] * self.Dim
+        self.settings = settings
+        # spacing in x and y directions
+        self.sx = float(settings["wave_energy_converter"]["sx_converter"])
+        self.sy = float(settings["wave_energy_converter"]["sy_converter"])
+        # load pre_layouts of the wind turbines
+        self.pre_layouts, self.corrections = self.load_pre_layouts()
         # upper limits of variables
         self.ub = [float(settings["global"]["length_x"])] * (self.Dim // 2) + \
                   [float(settings["global"]["length_y"])] * (self.Dim // 2)
         # if the borders are included
         self.lbin = [1] * self.Dim
         self.ubin = [1] * self.Dim
-        self.settings = settings
-        # spacing in x and y directions
-        self.sx = float(settings["wave_energy_converter"]["sx_converter"])
-        self.sy = float(settings["wave_energy_converter"]["sy_converter"])
         # kernels
         self.kernels = kernels
         # total number of generations
         self.total_gen = int(settings["global"]["max_generation"])
         # load wave distribution
         self.wave_dist = self.load_wave_dist()
+        # load wake and energy output model
+        self.wake_model, self.energy_model = self.parse_model()
+        # new feature: use global memory to store the layouts of the wave energy converter
+        # to save the time for transferring data between host and device
+        self.g_layouts = drv.mem_alloc(int(self.settings["global"]["num_individual"]) * self.Dim * 4)
 
         # display the info of this problem for debug
         self.display_info()
@@ -66,6 +74,29 @@ class OptWEC(ga.Problem):
                 Spacing in x and y: {}, {},
                 Total generation: {}
         """.format(self.Dim, self.ub[0], self.ub[-1], self.sx, self.sy, self.total_gen) + RESET)
+
+    def parse_model(self):
+        """
+            load wake model of wave energy converters
+        """
+
+        file = open("./func_and_paras.txt", "r")
+        models = []
+
+        for line in file.readlines():
+            if line[0] in ("#", "\n"):
+                # comment line
+                continue
+            else:
+                models.append([float(item) for item in line.split()])
+        models = np.array(models)
+
+        # pick out wake model and energy output model
+        m_wake = models[0:-1, :]
+        m_energy = models[-1, :]
+        file.close()
+
+        return m_wake, m_energy
 
     def load_wave_dist(self):
         # open the wave distribution file
@@ -96,37 +127,113 @@ class OptWEC(ga.Problem):
 
         return wave_dist
 
+    def load_pre_layouts(self):
+        """
+            load pre_layouts of the wind turbines
+        """
+
+        file = open(os.path.join(self.settings["proj_name"], self.settings["wind_turbine"]["pre_layouts"]), "r")
+
+        x, y, corrections = [], [], np.zeros(2)
+        for line in file.readlines():
+            if line[0] in ("#", "\n"):
+                # comment line
+                continue
+            else:
+                # read x, y of the predefined wind turbines
+                data = [float(item) for item in line.split(",")]
+                x.append(data[0])
+                y.append(data[1])
+        x = np.array(x)
+        y = np.array(y)
+
+        # some corrections on length of the wave energy farm
+        corrections[1] += (float(self.settings["global"]["length_y"]) - np.max(y) - np.min(y)) / 2
+        y = y + corrections[1]
+        if np.min(x) < 2 * self.sx:
+            x = x + 2 * self.sx
+            corrections[0] += 2 * self.sx
+        if np.min(x) < float(self.settings["global"]["length_x"]) / 5:
+            x = x + float(self.settings["global"]["length_x"]) / 5
+            corrections[0] += float(self.settings["global"]["length_x"]) / 5
+        if np.max(x) > float(self.settings["global"]["length_x"]):
+            self.settings["global"]["length_x"] = float(self.settings["global"]["length_x"]) + 2 * self.sx
+            print(LOG + "Length of the wave energy farm in x direction has been changed to {}".format(self.settings["global"]["length_x"]) + RESET)
+
+        return np.hstack((x, y)), corrections
+
     def aimFunc(self, pop):
         # update progress bar
         self.pbar.update(1)
 
         # pick out individuals
-        inds = pop.Phen
+        inds = pop.Phen.astype(np.float32)
+        # copy the current individuals to the device
+        drv.memcpy_htod(self.g_layouts, inds)
 
         # sort the wave energy converters according to the x coordinate
         # these codes are transplanted to GPU kernels
+        self.sort_converters(inds.shape[0])
 
         # calculate the constraint values first, no needs of ordering
-        pop.CV = self.cal_cv(inds).reshape((-1, 1))
+        pop.CV = self.cal_cv(inds.shape[0])
 
-        # objective values
-        pop.ObjV = np.zeros((inds.shape[0], 1))
-        # iterate each wave period and height combination
-        for j in range(self.wave_dist["num_T"]):
-            for i in range(self.wave_dist["num_H"]):
-                if self.wave_dist["Ps"][i][j] <= 1E-10:
-                    # no wave
-                    continue
-                else:
-                    # calculate the energy output corresponding this wave period and height
-                    pop.ObjV = self.predict_energy(inds)
-        pop.ObjV = pop.ObjV.reshape((-1, 2))
+        # calculate the objective values of the individuals
+        pop.ObjV = self.predict_energy(inds.shape[0])
 
-    def cal_cv(self, inputs):
-        return np.zeros((inputs.shape[0], 1)) - 1
+    def sort_converters(self, rows):
+        """
+            sort the wave energy converters on GPU
+        """
 
-    def predict_energy(self, inputs):
-        return np.ones(inputs.shape[0] * 2)
+        # run the kernel
+        func = self.kernels.get_function("sort_converters")
+        func(self.g_layouts, grid=(int(rows // 20 + 1), 1, 1), block=(20, 1, 1))
+
+    def cal_cv(self, rows):
+        """
+            calculate the constrain values for each individual
+        """
+
+        # prepare data
+        g_cvs = np.zeros(rows, dtype=np.float32)
+        g_sx = np.float32(self.sx).flatten()
+        g_sy = np.float32(self.sy).flatten()
+
+        # run the kernel function
+        func = self.kernels.get_function("cal_cv_converter")
+        func(self.g_layouts, drv.Out(g_cvs), drv.In(g_sx), drv.In(g_sy),
+             grid=(int(rows // 10 + 1), 1, 1), block=(10, 1, 1))
+
+        return g_cvs.reshape((-1, 1))
+
+    def predict_energy(self, rows):
+        """
+            calculate the energy outputs of the wave energy converters
+        """
+
+        # prepare data
+        g_energys = np.zeros(rows * 2, dtype=np.float32)
+        g_periods = np.float32(self.wave_dist["Ts"]).flatten()
+        g_num_T = np.int32(self.wave_dist["num_T"]).flatten()
+        g_heights = np.float32(self.wave_dist["Hs"]).flatten()
+        g_num_H = np.int32(self.wave_dist["num_H"]).flatten()
+        g_probs = np.float32(self.wave_dist["Ps"]).flatten()
+        g_wake_model = np.float32(self.wake_model).flatten()
+        g_energy_model = np.float32(self.energy_model).flatten()
+        g_pre_layouts = np.float32(self.pre_layouts).flatten()
+        g_num_pre_layouts = np.int32(self.pre_layouts.size // 2).flatten()
+        g_wave_heights = drv.mem_alloc(4 * int(self.settings["global"]["num_individual"]) * int(g_num_pre_layouts[0]))
+        g_temp = drv.mem_alloc(4 * int(self.settings["global"]["num_individual"]) * int(g_num_pre_layouts[0]))
+
+        # run the kernel
+        func = self.kernels.get_function("pre_energy_converter")
+        func(self.g_layouts, drv.Out(g_energys), drv.In(g_periods), drv.In(g_num_T), drv.In(g_heights),
+             drv.In(g_num_H), drv.In(g_probs), drv.In(g_wake_model), drv.In(g_energy_model),
+             drv.In(g_pre_layouts), drv.In(g_num_pre_layouts), g_wave_heights, g_temp,
+             grid=(int(rows // 10 + 1), 1, 1), block=(10, 1, 1))
+
+        return g_energys.reshape((-1, 2))
 
 
 def run_wave_energy_converter(problem):
@@ -181,6 +288,7 @@ def run_wave_energy_converter(problem):
     best_ind.save(os.path.join(problem.settings["proj_name"], "record_array"))
     file = open(os.path.join(problem.settings["proj_name"], "record_array", "record.txt"), "w")
     file.write("# Used time: {} s\n".format(interval_t))
+    file.write("# Corrections: {}, {}".format(problem.corrections[0], problem.corrections[1]))
     file.write("# HV\n")
     if myAlgo.log:
         file.write(
@@ -204,8 +312,8 @@ def run_wave_energy_converter(problem):
     objvs = np.array([[float(item) for item in line.split(",")] for line in file.readlines()])
     # find out the smallest objective value of wave loads
     index = np.argmin(objvs[:, 1])
-    # find out the maximum energy output
-    index = np.argmax(objvs[:, 0][np.argwhere(objvs[:, 1] / objvs[index, 1] <= 1.05)])
+    # # find out the maximum energy output
+    # index = np.argmax(objvs[:, 0][np.argwhere(objvs[:, 1] / objvs[index, 1] <= 1.05)])
     # then, index indicates where the best individual exists
     fig = plt.figure(figsize=(10, 10))
     file = open(os.path.join(problem.settings["proj_name"], "record_array", "Phen.csv"))
@@ -217,12 +325,15 @@ def run_wave_energy_converter(problem):
     for i in range(len(var_trace) // 2):
         # plt.scatter([var_trace[i]], [var_trace[i + len(var_trace) // 2]], s=100, c="k", zorder=2)
         plt.plot(
-            [var_trace[i], var_trace[i]],
-            [var_trace[i + len(var_trace) // 2] - 12.5, var_trace[i + len(var_trace) // 2] + 12.5],
+            [var_trace[i] - problem.corrections[0], var_trace[i] - problem.corrections[0]],
+            [var_trace[i + len(var_trace) // 2] - problem.corrections[1] - 12.5, var_trace[i + len(var_trace) // 2] - problem.corrections[1] + 12.5],
             "k-", linewidth=5, zorder=2
         )
-
-        # tune the plot limits
-        plt.xlim((0, problem.ub[0]))
-        plt.ylim((0, problem.ub[-1]))
+    for i in range(problem.pre_layouts.size // 2):
+        plt.plot(
+            [problem.pre_layouts[i] - problem.corrections[0], problem.pre_layouts[i] - problem.corrections[0]],
+            [problem.pre_layouts[i + problem.pre_layouts.size // 2] - problem.corrections[1] - float(problem.settings["wind_turbine"]["rotor_diameter"]) / 2,
+             problem.pre_layouts[i + problem.pre_layouts.size // 2] - problem.corrections[1] + float(problem.settings["wind_turbine"]["rotor_diameter"]) / 2],
+            "r-", linewidth=5, zorder=2
+        )
     plt.savefig(os.path.join(problem.settings["proj_name"], "record_array", "array.png"))

@@ -5,14 +5,21 @@ extern "C"{
 // ratio between radian and angle
 __device__ const float pi = 3.1415926535;
 __device__ const float pi_ratio = pi / 180;
+__device__ const float epsilon = 1e-10;
 // number of individuals
 __device__ const int num_inds = ${num_inds};
 // number of devices
 __device__ const int num_turbs = ${num_turbs};
+// number of converters
+__device__ const int num_converters = ${num_converters};
 // wind velocities
 __device__ float wind_vels[num_inds][num_turbs];
 // turbulence intensities
 __device__ float turb_ints[num_inds][num_turbs];
+// wave heights
+__device__ float wave_heights[num_inds][num_converters];
+// parameters of the wake model
+__device__ float paras_all[12 * num_inds];
 
 /* -------------------------------------------------------- */
 // Name: cal_cv
@@ -47,7 +54,7 @@ __device__ inline float cal_cv(float* inputs, float sx, float sy, int num_devs){
     }
 
     // use 1/* to ensure they are compact
-    return is_ok? 1 / cv_true: 1 / cv_false;
+    return is_ok? 100000 / cv_true: 100000 / cv_false;
 }
 
 /* -------------------------------------------------------- */
@@ -255,6 +262,175 @@ __global__ void plot_field_turb(float* inputs, float* x_array, float* y_array, f
     winds[threadId] = pow(wind, 0.5); turbs[threadId] = pow(turb, 0.5);
 }
 
-// TODO: order wave energy converters
+/* -------------------------------------------------------- */
+// Name: sort_converters
+// TODO: sort the wave energy converters in ascending order
+/* -------------------------------------------------------- */
+__global__ void sort_converters(float* inputs_all){
+    // calculate the index
+    const int threadId = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if(threadId >= num_inds){
+        // too much threads
+        return;
+    }
+    
+    // change inputs for the current kernel function
+    float *inputs = inputs_all + threadId * num_converters * 2;
+    // two temp variables
+    float angle, dist;
+    // sort the wind turbines in ascending order of x
+    for(int i = 0; i < num_converters - 1; i++){
+        for(int j = 0; j < num_converters - i - 1; j++){
+            if(inputs[j] > inputs[j + 1]){
+                // to reduce the memory cost of this function
+                // use angle and dist as temp variables here
+                angle = inputs[j]; dist = inputs[j + num_converters]; 
+                inputs[j] = inputs[j + 1]; inputs[j + num_converters] = inputs[j + 1 + num_converters];
+                inputs[j + 1] = angle; inputs[j + 1 + num_converters] = dist;
+            }
+        }
+    }
+}
 
+/* -------------------------------------------------------- */
+// Name: cal_cv_converter
+// TODO: calculate constraint values of wave energy converters
+/* -------------------------------------------------------- */
+__global__ void cal_cv_converter(float* inputs, float* cvs, float* sx, float* sy){
+    // calculate the index
+    const int threadId = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if(threadId >= num_inds){
+        // too much threads
+        return;
+    }
+
+    cvs[threadId] = cal_cv(inputs + threadId * num_converters * 2, *sx, *sy, num_converters);
+
+    // UNDO
+}
+
+/* -------------------------------------------------------- */
+// Name: pre_energy_converter
+// TODO: calculate energy outputs of the wave energy converters 
+/* -------------------------------------------------------- */
+__global__ void pre_energy_converter(float* inputs, float* energys, float* periods, int* num_t,
+    float* heights, int* num_h, float* probs, float* wake_model_first, float* energy_model, 
+    float* pre_layouts, int* num_pre_layouts, float* heights_wind_turb, float* temp){
+    // calculate the index
+    const int threadId = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if(threadId >= num_inds){
+        // too much threads
+        return;
+    }
+
+    // set zero
+    energys[threadId * 2] = energys[threadId * 2 + 1] = 0.0;
+
+    // re-locate inputs for the current thread
+    inputs += threadId * num_converters * 2;
+    heights_wind_turb += (*num_pre_layouts) * threadId;
+    for(int i = 0; i < (*num_pre_layouts); i++){
+        heights_wind_turb[i] = 0;
+    }
+    temp += (*num_pre_layouts) * threadId;
+
+    float deficit, x, y, period, height, prob;
+    // for convinience in accessing those data, re-locate them for the current thread
+    float *paras = paras_all + threadId * 12, *wake_model;
+    // iterate all the wave height and period combinations
+    for(int t = 0; t < (*num_t); t++){
+        for(int h = 0; h < (*num_h); h++){
+            // no wave
+            if(probs[h * (*num_t) + t] <= 1e-10) continue;
+            else{
+                // has wave
+                // pick out period, height, and probability first
+                period = periods[t]; height = heights[(*num_h) - 1 - h]; prob = probs[h * (*num_t) + t];
+                
+                // correct the period that is out of range
+                if(period < 5.5) period = 5.5;
+                else if(period > 11.5) period = 11.5;
+                else period = period;
+
+                // initialize wave height array
+                for(int i = 0; i < num_converters; i++){
+                    wave_heights[threadId][i] = height;
+                }
+                for(int i = 0; i < (*num_pre_layouts); i++){
+                    temp[i] = height;
+                }
+            
+                // iterate all the wave energy converters
+                for(int i = 0; i < num_converters; i++){
+                    // solve the wake model first
+                    for(int j = 0; j < 12; j++){
+                        // locate wake model for this parameter
+                        wake_model = wake_model_first + 6 * j;
+                        paras[j] = wake_model[0] * period * period + wake_model[1] * wave_heights[threadId][i] * wave_heights[threadId][i] + \
+                                   wake_model[2] * period * wave_heights[threadId][i] + wake_model[3] * period + wake_model[4] * wave_heights[threadId][i] + wake_model[5];
+                    }
+
+                    // solve wave height for each wave energy converter
+                    for(int j = i + 1; j < num_converters; j++){
+                        // calculate distance between two converters
+                        x = inputs[j] - inputs[i];
+                        y = inputs[j + num_converters] - inputs[i + num_converters];
+
+                        // calculate the wave deficit percentage
+                        deficit = pow(abs(paras[0]) + x, -abs(paras[1])) * (exp(-pow((y - paras[2] - paras[3] * x) / (paras[4] + paras[5] * x + epsilon), 2)) + \
+                                  exp(-pow((y + paras[2] + paras[3] * x) / (paras[4] + paras[5] * x + epsilon), 2)));
+                        // accumulate the wave surplus percentage
+                        deficit -= pow(abs(paras[6]) + x, -abs(paras[7])) * (exp(-pow((y - paras[8] - paras[9] * x) / (paras[10] + paras[11] * x + epsilon), 2)) + \
+                                   exp(-pow((y + paras[8] + paras[9] * x) / (paras[10] + paras[11] * x + epsilon), 2)));
+
+                        // calculate wave height of the ith converter in the threadIdth individual
+                        wave_heights[threadId][j] = pow(abs(pow(wave_heights[threadId][j], 2) - (deficit >= 0 ? 1 :-1) * pow(deficit * wave_heights[threadId][i], 2)), 0.5);
+                    }
+
+                    // solve wave height for each wind turbine
+                    for(int j = 0; j < (*num_pre_layouts); j++){
+                        // calculate distance between wave energy converter and wind turbine
+                        x = pre_layouts[j] - inputs[i];
+                        if(x <= 0) continue;
+                        y = pre_layouts[j + (*num_pre_layouts)] - inputs[i + num_converters];
+
+                        // calculate the wave deficit percentage
+                        deficit = pow(abs(paras[0]) + x, -abs(paras[1])) * (exp(-pow((y - paras[2] - paras[3] * x) / (paras[4] + paras[5] * x + epsilon), 2)) + \
+                                  exp(-pow((y + paras[2] + paras[3] * x) / (paras[4] + paras[5] * x + epsilon), 2)));
+                        // accumulate the wave surplus percentage
+                        deficit -= pow(abs(paras[6]) + x, -abs(paras[7])) * (exp(-pow((y - paras[8] - paras[9] * x) / (paras[10] + paras[11] * x + epsilon), 2)) + \
+                                   exp(-pow((y + paras[8] + paras[9] * x) / (paras[10] + paras[11] * x + epsilon), 2)));
+
+                        temp[j] = pow(abs(pow(temp[j], 2) - (deficit >= 0 ? 1 :-1) * pow(deficit * wave_heights[threadId][i], 2)), 0.5);
+                    }
+                }
+
+                if(periods[t] < 3.5){
+                    // set the initial wave heights to be incoming wave heights
+                    // do not consider wake effects herein
+                    for(int i = 0; i < num_converters; i++){
+                        wave_heights[threadId][i] = height;
+                    }
+                }
+                
+                // calculate energy output
+                for(int i = 0; i < num_converters; i++){
+                    energys[threadId * 2] += (energy_model[0] * period * period + energy_model[1] * wave_heights[threadId][i] * wave_heights[threadId][i] + \
+                                             energy_model[2] * period * wave_heights[threadId][i] + energy_model[3] * period + energy_model[4] * wave_heights[threadId][i] + energy_model[5]) * prob;
+                }
+                // calculate wave height ahead wind turbines
+                for(int i = 0; i < (*num_pre_layouts); i++){
+                    heights_wind_turb[i] += temp[i] * prob;
+                }
+            }
+        }
+    }
+    for(int i = 0; i < (*num_pre_layouts); i++){
+        energys[threadId * 2 + 1] = energys[threadId * 2 + 1] > heights_wind_turb[i] ? energys[threadId * 2 + 1] : heights_wind_turb[i];
+        // energys[threadId * 2 + 1] += heights_wind_turb[i];
+    }
+}
 }

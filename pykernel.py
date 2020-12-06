@@ -19,6 +19,7 @@ def init_cuda(settings):
     kernels = kernels.render(
         num_inds=int(settings["global"]["num_individual"]),
         num_turbs=int(settings["wind_turbine"]["num_turbine"]),
+        num_converters=int(settings["wave_energy_converter"]["num_converter"]),
     )
 
     # compile the kernel
