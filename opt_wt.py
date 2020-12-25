@@ -108,8 +108,18 @@ class OptWT(ga.Problem):
         # from the simulation results, it was found that the optimization results approximately
         # face the major wind direction. Hence, I add an option to disable wind direction
         if bool(int(self.settings["wind_turbine"]["ignore_direction"])):
-            direcs = np.array([0])
+            direcs = np.array([direcs[np.argmax(np.sum(wind_distribution, axis=1))]])
             wind_distribution = np.sum(wind_distribution, axis=0).reshape((1, -1))
+        if bool(int(self.settings["wind_turbine"]["ignore_velocity"])):
+            max_vel_idx = np.argmax(np.sum(wind_distribution, axis=0))
+            vels = np.array([vels[max_vel_idx]])
+            wind_distribution = wind_distribution[:, max_vel_idx].reshape((-1, 1))
+        if bool(int(self.settings["wind_turbine"]["ignore_direc_vel"])):
+            max_direc_idx = np.argmax(np.sum(wind_distribution, axis=1))
+            direcs = np.array([direcs[max_direc_idx]])
+            max_vel_idx = np.argmax(wind_distribution[max_direc_idx])
+            vels = np.array([vels[max_vel_idx]])
+            wind_distribution = np.array([wind_distribution[max_direc_idx, max_vel_idx]]).reshape((1, 1))
 
         return direcs, vels, wind_distribution
 
@@ -119,6 +129,12 @@ class OptWT(ga.Problem):
 
         # pick out individuals
         inds = pop.Phen
+
+        if self.settings["wind_turbine"]["test"] is not "":
+            file = open(os.path.join(self.settings["proj_name"], self.settings["wind_turbine"]["test"]), "r")
+            data = np.array([[float(item) for item in line.split(",")] for line in file.readlines()])
+            file.close()
+            inds[: data.shape[0], :] = data
 
         # sort the turbines according to the x coordinate
         # these codes are transplanted to GPU kernels
@@ -138,6 +154,12 @@ class OptWT(ga.Problem):
                     # calculate the energy output corresponding this wind, needs ordering and rotating
                     pop.ObjV = self.predict_energy(inds, pop.ObjV, self.direcs[i], self.vels[j], self.wind_dist[i][j])
         pop.ObjV = pop.ObjV.reshape((-1, 1))
+
+        if self.settings["wind_turbine"]["test"] is not "":
+            file = open(os.path.join(self.settings["proj_name"], "test_wind_turbine_objvs.txt"), "w")
+            for i in range(data.shape[0]):
+                file.write("{}\n".format(pop.ObjV[i, 0]))
+            exit(0)
 
     def cal_cv(self, inputs):
         """
@@ -182,7 +204,7 @@ class OptWT(ga.Problem):
         func = self.kernels.get_function("pre_energy_turb")
         func(drv.In(k_layouts), drv.InOut(k_energys), drv.In(k_direc), drv.In(k_vel), drv.In(k_start_vel),
              drv.In(k_cut_vel), drv.In(k_turb_int), drv.In(k_prob), drv.In(k_rad), drv.In(k_cp),
-             grid=(int(rows // 10 + 1), 1, 1), block=(10, 1, 1))
+             grid=(int(rows // 20 + 1), 1, 1), block=(20, 1, 1))
 
         return k_energys
 

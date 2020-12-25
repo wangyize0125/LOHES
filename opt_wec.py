@@ -199,10 +199,13 @@ class OptWEC(ga.Problem):
         g_cvs = np.zeros(rows, dtype=np.float32)
         g_sx = np.float32(self.sx).flatten()
         g_sy = np.float32(self.sy).flatten()
+        g_pre_layouts = np.float32(self.pre_layouts).flatten()
+        g_num_pre_layouts = np.int32(self.pre_layouts.size // 2).flatten()
 
         # run the kernel function
         func = self.kernels.get_function("cal_cv_converter")
         func(self.g_layouts, drv.Out(g_cvs), drv.In(g_sx), drv.In(g_sy),
+             drv.In(g_pre_layouts), drv.In(g_num_pre_layouts),
              grid=(int(rows // 10 + 1), 1, 1), block=(10, 1, 1))
 
         return g_cvs.reshape((-1, 1))
@@ -284,24 +287,12 @@ def run_wave_energy_converter(problem):
     print(TIP + "Genetic algorithm finds {} solutions".format(best_ind.sizes) + RESET)
 
     # otherwise, genetic algorithm succeed
-    # output: optimization results of wave energy converters
+    # HV curves are not outputted owing to the strong non-linearity
+    # # output: plot the HV curves
+    # fig = plt.figure(figsize=(10, 10))
+    # plt.plot(myAlgo.log["hv"])
+    # plt.savefig(os.path.join(problem.settings["proj_name"], "record_array", "hvs.png"))
     best_ind.save(os.path.join(problem.settings["proj_name"], "record_array"))
-    file = open(os.path.join(problem.settings["proj_name"], "record_array", "record.txt"), "w")
-    file.write("# Used time: {} s\n".format(interval_t))
-    file.write("# Corrections: {}, {}".format(problem.corrections[0], problem.corrections[1]))
-    file.write("# HV\n")
-    if myAlgo.log:
-        file.write(
-            "\n".join(
-                ["{:.6f}".format(myAlgo.log["hv"][gen]) for gen in range(len(myAlgo.log["gen"]))]
-            )
-        )
-    file.close()
-
-    # output: plot the HV curves
-    fig = plt.figure(figsize=(10, 10))
-    plt.plot(myAlgo.log["hv"])
-    plt.savefig(os.path.join(problem.settings["proj_name"], "record_array", "hvs.png"))
 
     # output: plot the wave energy converter array figure
     # find out the best wave energy converter array layouts first
@@ -315,25 +306,42 @@ def run_wave_energy_converter(problem):
     # # find out the maximum energy output
     # index = np.argmax(objvs[:, 0][np.argwhere(objvs[:, 1] / objvs[index, 1] <= 1.05)])
     # then, index indicates where the best individual exists
-    fig = plt.figure(figsize=(10, 10))
     file = open(os.path.join(problem.settings["proj_name"], "record_array", "Phen.csv"))
     # skip the former individuals and read out the best one
     for i in range(index):
         file.readline()
     # read out the best individual
     var_trace = [float(item) for item in file.readline().split(",")]
+    # change them to real coordinates
+    # wave energy converter
+    var_trace[:len(var_trace) // 2] -= problem.corrections[0]
+    var_trace[len(var_trace) // 2:] -= problem.corrections[1]
+    # wind turbines
+    problem.pre_layouts[:problem.pre_layouts.size // 2] -= problem.corrections[0]
+    problem.pre_layouts[problem.pre_layouts.size // 2:] -= problem.corrections[1]
+    # plot wind turbines and wave energy converters
+    fig = plt.figure(figsize=(10, 10))
     for i in range(len(var_trace) // 2):
         # plt.scatter([var_trace[i]], [var_trace[i + len(var_trace) // 2]], s=100, c="k", zorder=2)
         plt.plot(
-            [var_trace[i] - problem.corrections[0], var_trace[i] - problem.corrections[0]],
-            [var_trace[i + len(var_trace) // 2] - problem.corrections[1] - 12.5, var_trace[i + len(var_trace) // 2] - problem.corrections[1] + 12.5],
+            [var_trace[i], var_trace[i]],
+            [var_trace[i + len(var_trace) // 2] - 12.5, var_trace[i + len(var_trace) // 2] + 12.5],
             "k-", linewidth=5, zorder=2
         )
     for i in range(problem.pre_layouts.size // 2):
         plt.plot(
-            [problem.pre_layouts[i] - problem.corrections[0], problem.pre_layouts[i] - problem.corrections[0]],
-            [problem.pre_layouts[i + problem.pre_layouts.size // 2] - problem.corrections[1] - float(problem.settings["wind_turbine"]["rotor_diameter"]) / 2,
-             problem.pre_layouts[i + problem.pre_layouts.size // 2] - problem.corrections[1] + float(problem.settings["wind_turbine"]["rotor_diameter"]) / 2],
+            [problem.pre_layouts[i], problem.pre_layouts[i]],
+            [problem.pre_layouts[i + problem.pre_layouts.size // 2] - float(problem.settings["wind_turbine"]["rotor_diameter"]) / 2,
+             problem.pre_layouts[i + problem.pre_layouts.size // 2] + float(problem.settings["wind_turbine"]["rotor_diameter"]) / 2],
             "r-", linewidth=5, zorder=2
         )
     plt.savefig(os.path.join(problem.settings["proj_name"], "record_array", "array.png"))
+
+    # output: optimization results of wave energy converters
+    file = open(os.path.join(problem.settings["proj_name"], "record_array", "record.txt"), "w")
+    file.write("# Used time: {} s\n".format(interval_t))
+    file.write("# Corrections: {}, {}\n".format(problem.corrections[0], problem.corrections[1]))
+    file.write("# Optimized wave energy converters: (m)\n")
+    for i in range(len(var_trace) // 2):
+        file.write("\t{}, {}\n".format(var_trace[i], var_trace[i + len(var_trace) // 2]))
+    file.close()

@@ -48,6 +48,9 @@ default_settings = {
         "cp": 0.4,
         "plot_wind": 12,
         "ignore_direction": 1,
+        "ignore_velocity": 1,
+        "ignore_direc_vel": 1,
+        "test": None,
     },
 
     # for wave energy converter layout optimization
