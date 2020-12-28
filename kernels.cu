@@ -415,7 +415,7 @@ __global__ void pre_energy_converter(float* inputs, float* energys, float* perio
                     wave_heights[threadId][i] = height;
                 }
                 for(int i = 0; i < (*num_pre_layouts); i++){
-                    temp[i] = height;
+                    temp[i] = 0;
                 }
             
                 // iterate all the wave energy converters
@@ -442,7 +442,8 @@ __global__ void pre_energy_converter(float* inputs, float* energys, float* perio
                                    exp(-pow((y + paras[8] + paras[9] * x) / (paras[10] + paras[11] * x + epsilon), 2)));
 
                         // calculate wave height of the ith converter in the threadIdth individual
-                        wave_heights[threadId][j] = pow(abs(pow(wave_heights[threadId][j], 2) - (deficit >= 0 ? 1 :-1) * pow(deficit * wave_heights[threadId][i], 2)), 0.5);
+                        x = (height - wave_heights[threadId][j] >= 0 ? 1 : -1) * pow(height - wave_heights[threadId][j], 2) + (deficit >= 0 ? 1 :-1) * pow(deficit * wave_heights[threadId][i], 2);
+                        wave_heights[threadId][j] = height - (x >= 0 ? 1 : -1) * pow(abs(x), 0.5);
                     }
 
                     // solve wave height for each wind turbine
@@ -459,8 +460,13 @@ __global__ void pre_energy_converter(float* inputs, float* energys, float* perio
                         deficit -= pow(abs(paras[6]) + x, -abs(paras[7])) * (exp(-pow((y - paras[8] - paras[9] * x) / (paras[10] + paras[11] * x + epsilon), 2)) + \
                                    exp(-pow((y + paras[8] + paras[9] * x) / (paras[10] + paras[11] * x + epsilon), 2)));
 
-                        temp[j] = pow(abs(pow(temp[j], 2) - (deficit >= 0 ? 1 :-1) * pow(deficit * wave_heights[threadId][i], 2)), 0.5);
+                        temp[j] += (deficit >= 0 ? 1 :-1) * pow(deficit * wave_heights[threadId][i], 2);
                     }
+                }
+
+                // all wave height changes have been solved
+                for(int i = 0; i < (*num_pre_layouts); i++){
+                    temp[i] = height - (temp[i] > 0 ? 1 : -1) * pow(abs(temp[i]), 0.5);
                 }
 
                 if(periods[t] < 3.5){
