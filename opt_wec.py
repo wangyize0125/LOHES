@@ -57,6 +57,8 @@ class OptWEC(ga.Problem):
         # new feature: use global memory to store the layouts of the wave energy converter
         # to save the time for transferring data between host and device
         self.g_layouts = drv.mem_alloc(int(self.settings["global"]["num_individual"]) * self.Dim * 4)
+        # wave heights for the wind turbines
+        self.g_wave_heights = None
 
         # display the info of this problem for debug
         self.display_info()
@@ -122,6 +124,25 @@ class OptWEC(ga.Problem):
         acc_H = np.sum(np.sum(probs, axis=1) * heights[::-1])
         print(LOG + "Acc_T: {}\nAcc_H: {}\n".format(acc_T, acc_H) + RESET)
 
+        if bool(int(self.settings["wave_energy_converter"]["ignore_period"])):
+            print(LOG + "Ignore wave period when optimizing" + RESET)
+            max_period_idx = np.argmax(np.sum(probs, axis=0))
+            periods = np.array([periods[max_period_idx]])
+            probs = probs[:, max_period_idx].reshape((-1, 1))
+            probs /= np.sum(probs)
+        if bool(int(self.settings["wave_energy_converter"]["ignore_height"])):
+            print(LOG + "Ignore wave height when optimizing" + RESET)
+            max_height_idx = np.argmax(np.sum(probs, axis=1))
+            heights = np.array([heights[heights.size - max_height_idx - 1]])
+            probs = probs[max_height_idx, :].reshape((1, -1))
+            probs /= np.sum(probs)
+        if bool(int(self.settings["wave_energy_converter"]["ignore_period_height"])):
+            print(LOG + "Ignore wave period and height when optimizing" + RESET)
+            max_height_idx, max_period_idx = np.argwhere(probs == np.max(probs))[0]
+            heights = np.array([heights[heights.size - max_height_idx - 1]])
+            periods = np.array([periods[max_period_idx]])
+            probs = np.array([1]).reshape((1, 1))
+
         # use a dictionary to store the wave distribution
         wave_dist = {"Ts": periods, "Hs": heights, "Ps": probs, "num_T": periods.size, "num_H": heights.size, "d": 0.35}
 
@@ -168,6 +189,26 @@ class OptWEC(ga.Problem):
 
         # pick out individuals
         inds = pop.Phen.astype(np.float32)
+
+        if self.settings["wave_energy_converter"]["test"] is not "":
+            file = open(os.path.join(self.settings["proj_name"], self.settings["wave_energy_converter"]["test"]), "r")
+            correct = [float(item) for item in file.readline().split(",")]
+            data = []
+            temp = []
+            for line in file.readlines():
+                if line.startswith("#"):
+                    if len(temp) > 0:
+                        data.append(temp)
+                    temp = []
+                    continue
+                x_and_y = line.split(",")
+                temp.insert(len(temp) // 2, float(x_and_y[0]) + correct[0])
+                temp.append(float(x_and_y[1]) + correct[1])
+            data.append(temp)
+            data = np.array(data)
+            data = np.vstack((data, np.zeros_like(data[0]) + 10 ** 10))
+            inds[: data.shape[0], :] = data
+
         # copy the current individuals to the device
         drv.memcpy_htod(self.g_layouts, inds)
 
@@ -180,6 +221,17 @@ class OptWEC(ga.Problem):
 
         # calculate the objective values of the individuals
         pop.ObjV = self.predict_energy(inds.shape[0])
+
+        if self.settings["wave_energy_converter"]["test"] is not "":
+            # calculate wave loads
+            wave_loads = self.cal_wave_loads(data.shape[0])
+
+            file = open(os.path.join(self.settings["proj_name"], "test_wave_energy_converter_objv.txt"), "w")
+            file.write("# energy, max, min, avg, max, min, avg\n")
+            for i in range(data.shape[0]):
+                file.write("{}, {}, {}, {}, {}, {}, {}\n".format(pop.ObjV[i, 0], *wave_loads[i].tolist()))
+            file.close()
+            exit(0)
 
     def sort_converters(self, rows):
         """
@@ -226,17 +278,37 @@ class OptWEC(ga.Problem):
         g_energy_model = np.float32(self.energy_model).flatten()
         g_pre_layouts = np.float32(self.pre_layouts).flatten()
         g_num_pre_layouts = np.int32(self.pre_layouts.size // 2).flatten()
-        g_wave_heights = drv.mem_alloc(4 * int(self.settings["global"]["num_individual"]) * int(g_num_pre_layouts[0]))
+        self.g_wave_heights = drv.mem_alloc(4 * int(self.settings["global"]["num_individual"]) * int(g_num_pre_layouts[0]))
         g_temp = drv.mem_alloc(4 * int(self.settings["global"]["num_individual"]) * int(g_num_pre_layouts[0]))
 
         # run the kernel
         func = self.kernels.get_function("pre_energy_converter")
         func(self.g_layouts, drv.Out(g_energys), drv.In(g_periods), drv.In(g_num_T), drv.In(g_heights),
              drv.In(g_num_H), drv.In(g_probs), drv.In(g_wake_model), drv.In(g_energy_model),
-             drv.In(g_pre_layouts), drv.In(g_num_pre_layouts), g_wave_heights, g_temp,
+             drv.In(g_pre_layouts), drv.In(g_num_pre_layouts), self.g_wave_heights, g_temp,
              grid=(int(rows // 10 + 1), 1, 1), block=(10, 1, 1))
 
         return g_energys.reshape((-1, 2))
+
+    def cal_wave_loads(self, num):
+        """
+            calculate wave loads of the wind turbines
+        """
+
+        g_num_pre_layouts = np.int32(self.pre_layouts.size // 2).flatten()
+        g_num_test = np.int32(num).flatten()
+        wave_loads = np.zeros((num, self.pre_layouts.size), dtype=np.float32).flatten()
+
+        func = self.kernels.get_function("cal_wave_loads")
+        func(self.g_wave_heights, drv.In(g_num_pre_layouts), drv.In(g_num_test), drv.Out(wave_loads),
+             grid=(int(int(self.pre_layouts.size // 2 * num) // 3 + 1), 1, 1), block=(3, 1, 1))
+
+        wave_loads = wave_loads.reshape((num * 2, -1))
+        max_w, min_w, avg_w = np.max(wave_loads, axis=1), np.min(wave_loads, axis=1), np.average(wave_loads, axis=1)
+        wave_loads = np.vstack((max_w, min_w, avg_w)).T
+        wave_loads = np.hstack((wave_loads[: wave_loads.shape[0] // 2], wave_loads[wave_loads.shape[0] // 2:]))
+
+        return wave_loads
 
 
 def run_wave_energy_converter(problem):

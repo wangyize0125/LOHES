@@ -47,9 +47,9 @@ default_settings = {
         "rotor_diameter": 90,
         "cp": 0.4,
         "plot_wind": 12,
-        "ignore_direction": 1,
-        "ignore_velocity": 1,
-        "ignore_direc_vel": 1,
+        "ignore_direction": 0,
+        "ignore_velocity": 0,
+        "ignore_direc_vel": 0,
         "test": None,
     },
 
@@ -60,5 +60,9 @@ default_settings = {
         "sy_converter": 100.0,
         "converter": True,
         "wave_distribution": None,
+        "ignore_period": 0,
+        "ignore_height": 0,
+        "ignore_period_height": 0,
+        "test": None,
     },
 }
